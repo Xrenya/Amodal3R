@@ -93,4 +93,60 @@ python ./3d_mask_render.py
 It will create a `renders_mask` folder with the 3D consistent mask in it.
 
 
+### Usage Example (scaling the asset)
+
+The code is extansion for usage 3DGS in scenes which was implementated in the paper: [R3D2: Realistic 3D Asset Insertion via Diffusion for Autonomous Driving Simulation](https://research.zenseact.com/publications/R3D2/).
+
+This code allow you to scale the initial 3DGS to the size of the real object in the 3DGS scenes so it would fit correctly. 
+```python
+import torch
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Create model with your default parameters
+gaussian_model = Gaussian(
+    aabb=[-0.5, -0.5, -0.5, 1.0, 1.0, 1.0],
+    sh_degree=3,                
+    scaling_activation="softplus",   
+    device=device
+)
+
+# Load the model
+gaussian_model.load_ply("input_model.ply", transform=None)
+
+# Scale to target size
+target_size = [5.4310, 2.4373, 2.0099]
+gaussian_model.scale_to_target_size(target_size, mode='fit', center_at_origin=True)
+
+# ============ GET RODRIGUES VECTORS AFTER SCALING ============
+
+# Method 1: Direct property access
+rodrigues = gaussian_model.get_rodrigues  # (N, 3)
+print(f"Rodrigues shape: {rodrigues.shape}")
+print(f"Rodrigues range: [{rodrigues.min().item():.4f}, {rodrigues.max().item():.4f}]")
+
+# Method 2: Get all parameters at once
+params = gaussian_model.get_all_parameters(rotation_format='rodrigues')
+xyz = params['xyz']           # (N, 3)
+scales = params['scales']     # (N, 3)
+rodrigues = params['rotation'] # (N, 3)
+opacity = params['opacity']   # (N, 1)
+
+print(f"XYZ shape: {xyz.shape}")
+print(f"Scales shape: {scales.shape}")
+print(f"Rodrigues shape: {rodrigues.shape}")
+print(f"Opacity shape: {opacity.shape}")
+
+# Method 3: Get different rotation formats
+params_quat_wxyz = gaussian_model.get_all_parameters(rotation_format='quaternion_wxyz')
+params_quat_xyzw = gaussian_model.get_all_parameters(rotation_format='quaternion_xyzw')
+params_matrix = gaussian_model.get_all_parameters(rotation_format='matrix')
+
+print(f"Quaternion (w,x,y,z) shape: {params_quat_wxyz['rotation'].shape}")  # (N, 4)
+print(f"Quaternion (x,y,z,w) shape: {params_quat_xyzw['rotation'].shape}")  # (N, 4)
+print(f"Rotation matrix shape: {params_matrix['rotation'].shape}")          # (N, 3, 3)
+
+# Save scaled model
+gaussian_model.save_ply("scaled_model.ply", transform=None)
+```
 
