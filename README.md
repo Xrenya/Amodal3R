@@ -150,3 +150,113 @@ print(f"Rotation matrix shape: {params_matrix['rotation'].shape}")          # (N
 gaussian_model.save_ply("scaled_model.ply", transform=None)
 ```
 
+#### Asset inseration and rotation (rotate.py)
+
+Sometimes objects' positions in 4DGS scenes were generate not correctly and we need to adjust the angle of the object. This code will help to adjust angle in the scene (rotate 3DGS in the scene).  
+
+##### Usage
+```python
+import torch
+
+# Your saved data
+data = {
+    "params": {
+        "means": torch.randn(1000, 3).cuda(),
+        "scales": torch.randn(1000, 3).cuda(),
+        "rotations": torch.randn(1000, 3).cuda() * 0.1,
+        "rgbs": torch.rand(1000, 3).cuda(),
+        "opacities": torch.zeros(1000, 1).cuda(),
+    }
+}
+
+# ============ ROTATE USING EULER ANGLES ============
+# Rotate 45 degrees around Y axis (yaw)
+rotated_data = rotate_gaussians_euler(
+    data, 
+    yaw=45,      # rotation around Z (vertical)
+    pitch=0,     # rotation around Y
+    roll=0,      # rotation around X
+    degrees=True,
+    center=None  # rotates around centroid
+)
+
+# ============ ROTATE AROUND SPECIFIC AXIS ============
+# Rotate 90 degrees around Y axis
+rotated_data = rotate_gaussians_y(data, angle=90, degrees=True)
+
+# Rotate 30 degrees around custom axis
+rotated_data = rotate_gaussians_axis_angle(
+    data, 
+    axis=[1, 1, 0],  # diagonal axis
+    angle=30,
+    degrees=True
+)
+
+# ============ FULL TRANSFORMATION ============
+# Scale, rotate, and translate
+R = euler_to_rotation_matrix(yaw=45, pitch=0, roll=0)
+transformed_data = transform_gaussians(
+    data,
+    rotation_matrix=R,
+    translation=[1.0, 0.0, 0.0],  # move 1 unit in X
+    scale=2.0,  # double the size
+    center=None
+)
+
+# ============ CHAIN MULTIPLE ROTATIONS ============
+# First rotate around X, then around Y
+data_step1 = rotate_gaussians_x(data, angle=30)
+data_step2 = rotate_gaussians_y(data_step1, angle=45)
+```
+##### Full usage
+```python
+from general_utils import inverse_sigmoid
+
+# Load your Gaussian model
+gaussian_model = Gaussian(
+    aabb=[-0.5, -0.5, -0.5, 1.0, 1.0, 1.0],
+    sh_degree=3,                
+    scaling_activation="softplus",   
+    device='cuda'
+)
+gaussian_model.load_ply("input_model.ply", transform=None)
+
+# Scale to target size first
+target_size = [5.4310, 2.4373, 2.0099]
+# sometimes `mode='exact'` is more suitable if the object replacing the original but it might cause some distortion 
+gaussian_model.scale_to_target_size(target_size, mode='fit', center_at_origin=True)
+
+# Create data dict
+gs = gaussian_model
+data = {
+    "params": {
+        "means": gs.get_xyz.clone().to(torch.float32),
+        "scales": torch.log(gs.get_scaling).clone().to(torch.float32),
+        "rotations": gs.get_rodrigues.clone().to(torch.float32),
+        "rgbs": gs._features_dc.squeeze(1).clone().to(torch.float32),
+        "opacities": inverse_sigmoid(gs.get_opacity).clone().to(torch.float32),
+    }
+}
+
+# Rotate the data (e.g., 90 degrees around Y axis)
+rotated_data = rotate_gaussians_y(data, angle=90, degrees=True)
+
+# Or use Euler angles for complex rotations
+rotated_data = rotate_gaussians_euler(
+    data,
+    yaw=45,    # around Z
+    pitch=30,  # around Y  
+    roll=0,    # around X
+    degrees=True
+)
+
+# Access rotated parameters
+rotated_means = rotated_data['params']['means']
+rotated_scales = rotated_data['params']['scales']
+rotated_rotations = rotated_data['params']['rotations']
+
+print(f"Means: {rotated_means.shape}")
+print(f"Scales: {rotated_scales.shape}")
+print(f"Rotations: {rotated_rotations.shape}")
+```
+
