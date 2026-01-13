@@ -2,7 +2,6 @@ import torch
 import numpy as np
 from plyfile import PlyData, PlyElement
 from .general_utils import inverse_sigmoid, strip_symmetric, build_scaling_rotation
-import utils3d
 
 
 class Gaussian:
@@ -85,7 +84,6 @@ class Gaussian:
     def get_rotation_xyzw(self):
         """Returns normalized quaternions in (x, y, z, w) format."""
         quat_wxyz = self.get_rotation
-        # Convert from (w, x, y, z) to (x, y, z, w)
         return torch.cat([quat_wxyz[:, 1:4], quat_wxyz[:, 0:1]], dim=-1)
     
     @property
@@ -103,29 +101,109 @@ class Gaussian:
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation + self.rots_bias[None, :])
 
+    # ==================== QUATERNION/MATRIX CONVERSIONS (NO EXTERNAL DEPENDENCY) ====================
+    
+    @staticmethod
+    def _quaternion_wxyz_to_matrix_np(quaternions):
+        """
+        Convert quaternions (w, x, y, z) to rotation matrices.
+        Works with numpy arrays.
+        
+        Args:
+            quaternions: array of shape (N, 4) in (w, x, y, z) format
+        
+        Returns:
+            matrices: array of shape (N, 3, 3)
+        """
+        # Normalize
+        quaternions = quaternions / np.linalg.norm(quaternions, axis=-1, keepdims=True)
+        
+        w, x, y, z = quaternions[:, 0], quaternions[:, 1], quaternions[:, 2], quaternions[:, 3]
+        
+        N = quaternions.shape[0]
+        R = np.zeros((N, 3, 3), dtype=quaternions.dtype)
+        
+        R[:, 0, 0] = 1 - 2*y*y - 2*z*z
+        R[:, 0, 1] = 2*x*y - 2*w*z
+        R[:, 0, 2] = 2*x*z + 2*w*y
+        R[:, 1, 0] = 2*x*y + 2*w*z
+        R[:, 1, 1] = 1 - 2*x*x - 2*z*z
+        R[:, 1, 2] = 2*y*z - 2*w*x
+        R[:, 2, 0] = 2*x*z - 2*w*y
+        R[:, 2, 1] = 2*y*z + 2*w*x
+        R[:, 2, 2] = 1 - 2*x*x - 2*y*y
+        
+        return R
+    
+    @staticmethod
+    def _matrix_to_quaternion_wxyz_np(matrices):
+        """
+        Convert rotation matrices to quaternions (w, x, y, z).
+        Works with numpy arrays.
+        
+        Args:
+            matrices: array of shape (N, 3, 3)
+        
+        Returns:
+            quaternions: array of shape (N, 4) in (w, x, y, z) format
+        """
+        N = matrices.shape[0]
+        m = matrices
+        trace = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
+        
+        quaternions = np.zeros((N, 4), dtype=matrices.dtype)
+        
+        # Case 1: trace > 0
+        mask1 = trace > 0
+        if np.any(mask1):
+            s = np.sqrt(trace[mask1] + 1.0) * 2
+            quaternions[mask1, 0] = 0.25 * s
+            quaternions[mask1, 1] = (m[mask1, 2, 1] - m[mask1, 1, 2]) / s
+            quaternions[mask1, 2] = (m[mask1, 0, 2] - m[mask1, 2, 0]) / s
+            quaternions[mask1, 3] = (m[mask1, 1, 0] - m[mask1, 0, 1]) / s
+        
+        # Case 2: m[0,0] is largest diagonal
+        mask2 = (~mask1) & (m[:, 0, 0] > m[:, 1, 1]) & (m[:, 0, 0] > m[:, 2, 2])
+        if np.any(mask2):
+            s = np.sqrt(1.0 + m[mask2, 0, 0] - m[mask2, 1, 1] - m[mask2, 2, 2]) * 2
+            quaternions[mask2, 0] = (m[mask2, 2, 1] - m[mask2, 1, 2]) / s
+            quaternions[mask2, 1] = 0.25 * s
+            quaternions[mask2, 2] = (m[mask2, 0, 1] + m[mask2, 1, 0]) / s
+            quaternions[mask2, 3] = (m[mask2, 0, 2] + m[mask2, 2, 0]) / s
+        
+        # Case 3: m[1,1] is largest diagonal
+        mask3 = (~mask1) & (~mask2) & (m[:, 1, 1] > m[:, 2, 2])
+        if np.any(mask3):
+            s = np.sqrt(1.0 + m[mask3, 1, 1] - m[mask3, 0, 0] - m[mask3, 2, 2]) * 2
+            quaternions[mask3, 0] = (m[mask3, 0, 2] - m[mask3, 2, 0]) / s
+            quaternions[mask3, 1] = (m[mask3, 0, 1] + m[mask3, 1, 0]) / s
+            quaternions[mask3, 2] = 0.25 * s
+            quaternions[mask3, 3] = (m[mask3, 1, 2] + m[mask3, 2, 1]) / s
+        
+        # Case 4: m[2,2] is largest diagonal
+        mask4 = (~mask1) & (~mask2) & (~mask3)
+        if np.any(mask4):
+            s = np.sqrt(1.0 + m[mask4, 2, 2] - m[mask4, 0, 0] - m[mask4, 1, 1]) * 2
+            quaternions[mask4, 0] = (m[mask4, 1, 0] - m[mask4, 0, 1]) / s
+            quaternions[mask4, 1] = (m[mask4, 0, 2] + m[mask4, 2, 0]) / s
+            quaternions[mask4, 2] = (m[mask4, 1, 2] + m[mask4, 2, 1]) / s
+            quaternions[mask4, 3] = 0.25 * s
+        
+        # Normalize
+        quaternions = quaternions / np.linalg.norm(quaternions, axis=-1, keepdims=True)
+        
+        return quaternions
+
     # ==================== RODRIGUES CONVERSION ====================
     
     @property
     def get_rodrigues(self):
-        """
-        Get rotation as Rodrigues vectors (axis * angle) from internal quaternions.
-        
-        Returns:
-            rodrigues: tensor of shape (N, 3)
-        """
+        """Get rotation as Rodrigues vectors (axis * angle)."""
         return self.quaternion_wxyz_to_rodrigues(self.get_rotation)
     
     @staticmethod
     def quaternion_wxyz_to_rodrigues(quaternions_wxyz):
-        """
-        Convert quaternions (w, x, y, z) to Rodrigues vectors.
-        
-        Args:
-            quaternions_wxyz: tensor of shape (N, 4) in (w, x, y, z) format
-        
-        Returns:
-            rodrigues: tensor of shape (N, 3)
-        """
+        """Convert quaternions (w, x, y, z) to Rodrigues vectors."""
         quaternions_wxyz = torch.nn.functional.normalize(quaternions_wxyz, p=2, dim=-1)
         
         w = quaternions_wxyz[..., 0]
@@ -133,45 +211,6 @@ class Gaussian:
         y = quaternions_wxyz[..., 2]
         z = quaternions_wxyz[..., 3]
         
-        # Angle = 2 * arccos(w), clamped for numerical stability
-        angle = 2 * torch.acos(torch.clamp(w, -1.0 + 1e-7, 1.0 - 1e-7))
-        
-        # sin(angle/2) = sqrt(1 - w^2)
-        sin_half_angle = torch.sqrt(torch.clamp(1.0 - w * w, min=1e-10))
-        
-        # Build axis vector (N, 3)
-        axis = torch.stack([x, y, z], dim=-1)
-        
-        # Normalize axis where rotation is non-trivial
-        non_zero_mask = sin_half_angle > 1e-8
-        axis[non_zero_mask] = axis[non_zero_mask] / sin_half_angle[non_zero_mask].unsqueeze(-1)
-        
-        # For near-zero rotations, set default axis
-        axis[~non_zero_mask] = torch.tensor([1.0, 0.0, 0.0], device=axis.device, dtype=axis.dtype)
-        
-        # Rodrigues = axis * angle
-        rodrigues = axis * angle.unsqueeze(-1)
-        
-        return rodrigues
-    
-    @staticmethod
-    def quaternion_xyzw_to_rodrigues(quaternions_xyzw):
-        """
-        Convert quaternions (x, y, z, w) to Rodrigues vectors.
-        
-        Args:
-            quaternions_xyzw: tensor of shape (N, 4) in (x, y, z, w) format
-        
-        Returns:
-            rodrigues: tensor of shape (N, 3)
-        """
-        quaternions_xyzw = torch.nn.functional.normalize(quaternions_xyzw, p=2, dim=-1)
-        
-        x = quaternions_xyzw[..., 0]
-        y = quaternions_xyzw[..., 1]
-        z = quaternions_xyzw[..., 2]
-        w = quaternions_xyzw[..., 3]
-        
         angle = 2 * torch.acos(torch.clamp(w, -1.0 + 1e-7, 1.0 - 1e-7))
         sin_half_angle = torch.sqrt(torch.clamp(1.0 - w * w, min=1e-10))
         
@@ -182,20 +221,11 @@ class Gaussian:
         axis[~non_zero_mask] = torch.tensor([1.0, 0.0, 0.0], device=axis.device, dtype=axis.dtype)
         
         rodrigues = axis * angle.unsqueeze(-1)
-        
         return rodrigues
     
     @staticmethod
     def rodrigues_to_quaternion_wxyz(rodrigues):
-        """
-        Convert Rodrigues vectors to quaternions (w, x, y, z).
-        
-        Args:
-            rodrigues: tensor of shape (N, 3)
-        
-        Returns:
-            quaternions: tensor of shape (N, 4) in (w, x, y, z) format
-        """
+        """Convert Rodrigues vectors to quaternions (w, x, y, z)."""
         angle = torch.norm(rodrigues, dim=-1, keepdim=True)
         angle_safe = torch.clamp(angle, min=1e-10)
         
@@ -205,45 +235,17 @@ class Gaussian:
         w = torch.cos(half_angle)
         xyz = axis * torch.sin(half_angle)
         
-        quaternions = torch.cat([w, xyz], dim=-1)  # (w, x, y, z)
+        quaternions = torch.cat([w, xyz], dim=-1)
         
-        # Handle zero rotation
         zero_mask = angle.squeeze(-1) < 1e-8
         quaternions[zero_mask] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=rodrigues.device, dtype=rodrigues.dtype)
         
         return torch.nn.functional.normalize(quaternions, dim=-1)
-    
-    @staticmethod
-    def rodrigues_to_quaternion_xyzw(rodrigues):
-        """
-        Convert Rodrigues vectors to quaternions (x, y, z, w).
-        
-        Args:
-            rodrigues: tensor of shape (N, 3)
-        
-        Returns:
-            quaternions: tensor of shape (N, 4) in (x, y, z, w) format
-        """
-        angle = torch.norm(rodrigues, dim=-1, keepdim=True)
-        angle_safe = torch.clamp(angle, min=1e-10)
-        
-        axis = rodrigues / angle_safe
-        
-        half_angle = angle / 2
-        w = torch.cos(half_angle)
-        xyz = axis * torch.sin(half_angle)
-        
-        quaternions = torch.cat([xyz, w], dim=-1)  # (x, y, z, w)
-        
-        zero_mask = angle.squeeze(-1) < 1e-8
-        quaternions[zero_mask] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=rodrigues.device, dtype=rodrigues.dtype)
-        
-        return torch.nn.functional.normalize(quaternions, dim=-1)
 
-    # ==================== MATRIX CONVERSIONS ====================
+    # ==================== TORCH MATRIX CONVERSIONS ====================
     
     def _quaternion_wxyz_to_matrix(self, quaternions):
-        """Convert quaternions (w,x,y,z) to rotation matrices."""
+        """Convert quaternions (w,x,y,z) to rotation matrices (torch)."""
         quaternions = torch.nn.functional.normalize(quaternions, dim=-1)
         w, x, y, z = quaternions[:, 0], quaternions[:, 1], quaternions[:, 2], quaternions[:, 3]
         
@@ -263,7 +265,7 @@ class Gaussian:
         return R
     
     def _matrix_to_quaternion_wxyz(self, matrices):
-        """Convert rotation matrices to quaternions (w,x,y,z)."""
+        """Convert rotation matrices to quaternions (w,x,y,z) (torch)."""
         batch_size = matrices.shape[0]
         m = matrices
         trace = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
@@ -314,11 +316,6 @@ class Gaussian:
     def from_rotation(self, rots):
         """Set rotation from quaternions (w, x, y, z)."""
         self._rotation = rots - self.rots_bias[None, :]
-    
-    def from_rotation_xyzw(self, rots_xyzw):
-        """Set rotation from quaternions (x, y, z, w)."""
-        rots_wxyz = torch.cat([rots_xyzw[:, 3:4], rots_xyzw[:, 0:3]], dim=-1)
-        self._rotation = rots_wxyz - self.rots_bias[None, :]
     
     def from_rodrigues(self, rodrigues):
         """Set rotation from Rodrigues vectors."""
@@ -377,7 +374,7 @@ class Gaussian:
         self.mininum_kernel_size *= abs(scale_factor)
 
     def scale_nonuniform(self, scale_factors, center=None):
-        """Non-uniform scaling - rotation changes."""
+        """Non-uniform scaling - rotation changes via covariance transformation."""
         if not isinstance(scale_factors, torch.Tensor):
             scale_factors = torch.tensor(scale_factors, dtype=torch.float32, device=self.device)
         
@@ -386,12 +383,10 @@ class Gaussian:
         elif not isinstance(center, torch.Tensor):
             center = torch.tensor(center, dtype=torch.float32, device=self.device)
         
-        # Scale positions
         xyz = self.get_xyz
         scaled_xyz = (xyz - center) * scale_factors + center
         self.from_xyz(scaled_xyz)
         
-        # Transform covariance
         quats = self.get_rotation
         scales = self.get_scaling
         R = self._quaternion_wxyz_to_matrix(quats)
@@ -434,14 +429,7 @@ class Gaussian:
                 self.scale_nonuniform(scale_factors, center)
 
     def scale_to_target_size(self, target_size, mode='fit', center_at_origin=True):
-        """
-        Scale to target size.
-        
-        Args:
-            target_size: [size_x, size_y, size_z]
-            mode: 'fit' (uniform, inside), 'fill' (uniform, cover), 'exact' (non-uniform)
-            center_at_origin: center after scaling
-        """
+        """Scale to target size."""
         if not isinstance(target_size, torch.Tensor):
             target_size = torch.tensor(target_size, dtype=torch.float32, device=self.device)
         
@@ -468,40 +456,7 @@ class Gaussian:
         
         print(f"Final size:   {self.get_current_size().cpu().numpy()}")
 
-    # ==================== EXTRACT ALL PARAMETERS ====================
-    
-    def get_all_parameters(self, rotation_format='rodrigues'):
-        """
-        Extract all Gaussian parameters after scaling.
-        
-        Args:
-            rotation_format: 'rodrigues', 'quaternion_wxyz', 'quaternion_xyzw', or 'matrix'
-        
-        Returns:
-            dict with keys: 'xyz', 'scales', 'rotation', 'opacity', 'features_dc', 'features_rest'
-        """
-        result = {
-            'xyz': self.get_xyz,
-            'scales': self.get_scaling,
-            'opacity': self.get_opacity,
-            'features_dc': self._features_dc,
-            'features_rest': self._features_rest,
-        }
-        
-        if rotation_format == 'rodrigues':
-            result['rotation'] = self.get_rodrigues
-        elif rotation_format == 'quaternion_wxyz':
-            result['rotation'] = self.get_rotation
-        elif rotation_format == 'quaternion_xyzw':
-            result['rotation'] = self.get_rotation_xyzw
-        elif rotation_format == 'matrix':
-            result['rotation'] = self._quaternion_wxyz_to_matrix(self.get_rotation)
-        else:
-            raise ValueError(f"Unknown rotation_format: {rotation_format}")
-        
-        return result
-
-    # ==================== PLY I/O ====================
+    # ==================== PLY I/O (FIXED) ====================
     
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
@@ -517,7 +472,16 @@ class Gaussian:
             l.append('rot_{}'.format(i))
         return l
         
-    def save_ply(self, path, transform=[[1, 0, 0], [0, 0, -1], [0, 1, 0]]):
+    def save_ply(self, path, transform=None):
+        """
+        Save Gaussian model to PLY file.
+        
+        Args:
+            path: output file path
+            transform: 3x3 rotation matrix to transform coordinates before saving.
+                      Use [[1, 0, 0], [0, 0, -1], [0, 1, 0]] for Y-up to Z-up.
+                      Default None means no transformation.
+        """
         xyz = self.get_xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
@@ -532,11 +496,14 @@ class Gaussian:
         rotation = (self._rotation + self.rots_bias[None, :]).detach().cpu().numpy()
         
         if transform is not None:
-            transform = np.array(transform)
+            transform = np.array(transform, dtype=np.float32)
+            # Transform positions: xyz' = xyz @ T^T
             xyz = np.matmul(xyz, transform.T)
-            rotation = utils3d.numpy.quaternion_to_matrix(rotation)
-            rotation = np.matmul(transform, rotation)
-            rotation = utils3d.numpy.matrix_to_quaternion(rotation)
+            # Transform rotations: R' = T @ R
+            rot_matrices = self._quaternion_wxyz_to_matrix_np(rotation)
+            # Apply: result[i] = transform @ rot_matrices[i]
+            rot_matrices = np.matmul(transform, rot_matrices)
+            rotation = self._matrix_to_quaternion_wxyz_np(rot_matrices)
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
@@ -551,15 +518,25 @@ class Gaussian:
         PlyData([el]).write(path)
         print(f"Saved {xyz.shape[0]} Gaussians to {path}")
 
-    def load_ply(self, path, transform=[[1, 0, 0], [0, 0, -1], [0, 1, 0]]):
+    def load_ply(self, path, transform=None):
+        """
+        Load Gaussian model from PLY file.
+        
+        Args:
+            path: input file path
+            transform: 3x3 rotation matrix that was used when saving.
+                      This will be inverted to recover original coordinates.
+                      Must match the transform used in save_ply.
+                      Default None means no transformation.
+        """
         plydata = PlyData.read(path)
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
-                        np.asarray(plydata.elements[0]["z"])),  axis=1)
-        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+                        np.asarray(plydata.elements[0]["z"])),  axis=1).astype(np.float32)
+        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis].astype(np.float32)
 
-        features_dc = np.zeros((xyz.shape[0], 3, 1))
+        features_dc = np.zeros((xyz.shape[0], 3, 1), dtype=np.float32)
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
         features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
         features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
@@ -569,29 +546,35 @@ class Gaussian:
             extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
             if len(extra_f_names) > 0:
                 extra_f_names = sorted(extra_f_names, key=lambda x: int(x.split('_')[-1]))
-                features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+                features_extra = np.zeros((xyz.shape[0], len(extra_f_names)), dtype=np.float32)
                 for idx, attr_name in enumerate(extra_f_names):
                     features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
                 features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key=lambda x: int(x.split('_')[-1]))
-        scales = np.zeros((xyz.shape[0], len(scale_names)))
+        scales = np.zeros((xyz.shape[0], len(scale_names)), dtype=np.float32)
         for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
         rot_names = sorted(rot_names, key=lambda x: int(x.split('_')[-1]))
-        rots = np.zeros((xyz.shape[0], len(rot_names)))
+        rots = np.zeros((xyz.shape[0], len(rot_names)), dtype=np.float32)
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
             
         if transform is not None:
-            transform = np.array(transform)
+            transform = np.array(transform, dtype=np.float32)
+            # Inverse transform for positions: xyz = xyz' @ T 
+            # (since xyz' = xyz @ T^T, and T @ T^T = I for orthogonal T)
             xyz = np.matmul(xyz, transform)
-            rots = utils3d.numpy.quaternion_to_matrix(rots)
-            rots = np.matmul(rots, transform)
-            rots = utils3d.numpy.matrix_to_quaternion(rots)
+            
+            # Inverse transform for rotations: R = T^T @ R'
+            # (since R' = T @ R, we need T^T @ R' = T^T @ T @ R = R)
+            rot_matrices = self._quaternion_wxyz_to_matrix_np(rots)
+            # Apply: result[i] = T^T @ rot_matrices[i]
+            rot_matrices = np.matmul(transform.T, rot_matrices)
+            rots = self._matrix_to_quaternion_wxyz_np(rot_matrices)
             
         xyz = torch.tensor(xyz, dtype=torch.float, device=self.device)
         features_dc = torch.tensor(features_dc, dtype=torch.float, device=self.device).transpose(1, 2).contiguous()
@@ -611,3 +594,26 @@ class Gaussian:
         self._rotation = rots - self.rots_bias[None, :]
         
         print(f"Loaded {xyz.shape[0]} Gaussians from {path}")
+
+    # ==================== EXTRACT PARAMETERS ====================
+    
+    def get_all_parameters(self, rotation_format='rodrigues'):
+        """Extract all Gaussian parameters."""
+        result = {
+            'xyz': self.get_xyz,
+            'scales': self.get_scaling,
+            'opacity': self.get_opacity,
+            'features_dc': self._features_dc,
+            'features_rest': self._features_rest,
+        }
+        
+        if rotation_format == 'rodrigues':
+            result['rotation'] = self.get_rodrigues
+        elif rotation_format == 'quaternion_wxyz':
+            result['rotation'] = self.get_rotation
+        elif rotation_format == 'quaternion_xyzw':
+            result['rotation'] = self.get_rotation_xyzw
+        elif rotation_format == 'matrix':
+            result['rotation'] = self._quaternion_wxyz_to_matrix(self.get_rotation)
+        
+        return result
