@@ -208,6 +208,27 @@ transformed_data = transform_gaussians(
 data_step1 = rotate_gaussians_x(data, angle=30)
 data_step2 = rotate_gaussians_y(data_step1, angle=45)
 ```
+
+##### Save and load
+```python
+gaussian_model = Gaussian(aabb=[-0.5, -0.5, -0.5, 1.0, 1.0, 1.0], sh_degree=3, 
+               scaling_activation="softplus", device='cuda')
+gaussian_model.load_ply("original.ply", transform=None)
+
+# Get original values
+xyz_before = gs1.get_xyz.clone()
+rot_before = gs1.get_rotation.clone()
+scale_before = gs1.get_scaling.clone()
+
+# Scaling to the target size
+target_size = [5.4310, 2.4373, 2.0099]
+# sometimes `mode='exact'` is more suitable if the object replacing the original but it might cause some distortion 
+gaussian_model.scale_to_target_size(target_size, mode='fit', center_at_origin=True)
+
+# Save and reload
+gaussian_model.save_ply("test.ply", transform=None)
+```
+
 ##### Full usage
 ```python
 from general_utils import inverse_sigmoid
